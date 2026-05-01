@@ -1,0 +1,197 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime, timedelta
+import plotly.express as px
+from supabase import create_client, Client
+
+# ============ 这里填你刚刚复制的两个东西 =============
+SUPABASE_URL = "https://cepgkanysdqglcvtxahv.supabase.co"
+SUPABASE_KEY = "sb_publishable_ggKSdRP-6ILRdX99qlUIJg_OJACy2pS"
+# =====================================================
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+st.set_page_config(page_title="公司记账系统", layout="wide")
+
+# 样式
+st.markdown("""
+<style>
+div[data-testid="metric-container"] {background:transparent;padding:0;margin:0;}
+.st-table, .st-dataframe {font-size:13px;}
+.bill-list-wrap {max-height: 600px; overflow-y: auto; padding-right:5px;}
+</style>
+""", unsafe_allow_html=True)
+
+# 从云端读取数据
+def load_all():
+    res = supabase.table("company_records").select("*").execute()
+    records = res.data if res.data else []
+
+    cat_res = supabase.table("company_cats").select("*").execute()
+    if cat_res.data:
+        cats = cat_res.data[0]
+    else:
+        cats = {
+            "income": ["维修收入", "灌溉工程", "材料销售", "杂项营收"],
+            "expense": ["加油燃油","材料费用","餐费","电话费用","工具费用","商业保险","汽车保险","汽车维保","学习费用","设备租赁费用"]
+        }
+        supabase.table("company_cats").insert([cats]).execute()
+    return records, cats
+
+def save_new_rec(row):
+    supabase.table("company_records").insert([row]).execute()
+
+def del_rec(rec_id):
+    supabase.table("company_records").delete().eq("id", rec_id).execute()
+
+def update_rec(rec_id, row):
+    supabase.table("company_records").update(row).eq("id", rec_id).execute()
+
+def save_cats(cats):
+    supabase.table("company_cats").update(cats).eq("id", cats["id"]).execute()
+
+# 初始化
+records, cats = load_all()
+cat_in = cats["income"]
+cat_ex = cats["expense"]
+
+if "edit_id" not in st.session_state:
+    st.session_state.edit_id = None
+
+st.title("🏢 公司专用记账系统（云端永久保存）")
+
+# 分类管理
+with st.expander("⚙️ 分类管理", expanded=False):
+    t1, t2 = st.tabs(["收入类别","支出类别"])
+    with t1:
+        new_in = st.text_input("新增收入类别")
+        if st.button("➕ 添加收入") and new_in.strip() and new_in not in cat_in:
+            cat_in.append(new_in)
+            save_cats(cats)
+            st.rerun()
+        sel_del_in = st.selectbox("删除收入类别", cat_in)
+        if st.button("🗑️ 删除收入"):
+            cat_in.remove(sel_del_in)
+            save_cats(cats)
+            st.rerun()
+    with t2:
+        new_ex = st.text_input("新增支出类别")
+        if st.button("➕ 添加支出") and new_ex.strip() and new_ex not in cat_ex:
+            cat_ex.append(new_ex)
+            save_cats(cats)
+            st.rerun()
+        sel_del_ex = st.selectbox("删除支出类别", cat_ex)
+        if st.button("🗑️ 删除支出"):
+            cat_ex.remove(sel_del_ex)
+            save_cats(cats)
+            st.rerun()
+
+st.divider()
+
+# 修改账单弹窗
+if st.session_state.edit_id is not None:
+    edit_id = st.session_state.edit_id
+    data = next(x for x in records if x["id"] == edit_id)
+    st.markdown("### ✏️ 修改账单")
+
+    c1,c2 = st.columns(2)
+    with c1:
+        ed_date = st.date_input("日期", datetime.strptime(data["date"], "%Y-%m-%d"))
+        ed_type = st.selectbox("类型", ["收入","支出"], 0 if data["type"]=="收入" else 1)
+    with c2:
+        lst_cat = cat_in if ed_type=="收入" else cat_ex
+        ed_cat = st.selectbox("类别", lst_cat, lst_cat.index(data["category"]))
+
+    ed_net = st.number_input("税前金额(CAD)", value=float(data["net"]), min_value=0.0, step=0.01)
+    hst_mode = st.radio("HST 计税方式", ["自动13%","手动输入"], horizontal=True)
+    if hst_mode == "自动13%":
+        ed_hst = round(ed_net * 0.13, 2)
+    else:
+        ed_hst = st.number_input("手动输入HST", value=float(data["hst"]), step=0.01)
+
+    ed_total = round(ed_net + ed_hst, 2)
+    st.info(f"含税合计：${ed_total:.2f}")
+    ed_note = st.text_input("备注", value=data["note"])
+
+    b1,b2 = st.columns(2)
+    with b1:
+        if st.button("✅ 保存修改", use_container_width=True):
+            update_rec(edit_id, {
+                "date":str(ed_date),
+                "type":ed_type,
+                "category":ed_cat,
+                "net":ed_net,
+                "hst":ed_hst,
+                "total":ed_total,
+                "note":ed_note
+            })
+            st.session_state.edit_id = None
+            st.rerun()
+    with b2:
+        if st.button("❌ 取消", use_container_width=True):
+            st.session_state.edit_id = None
+            st.rerun()
+
+else:
+    # 新增账单
+    st.markdown("### 📝 新增一笔账单")
+    c1,c2 = st.columns(2)
+    with c1:
+        now_date = st.date_input("选择日期", datetime.today())
+        now_type = st.selectbox("收入 / 支出", ["收入","支出"])
+    with c2:
+        now_cat = st.selectbox("选择类别", cat_in if now_type=="收入" else cat_ex)
+
+    hst_mode = st.radio("HST 计税", ["自动13%","手动输入"], horizontal=True)
+    net_val = st.number_input("税前金额(CAD)", min_value=0.0, step=0.01)
+
+    if hst_mode == "自动13%":
+        hst_val = round(net_val * 0.13, 2)
+    else:
+        hst_val = st.number_input("手动输入HST", min_value=0.0, step=0.01)
+
+    total_val = round(net_val + hst_val, 2)
+    st.info(f"✅ 税前: {net_val:.2f} | HST: {hst_val:.2f} | 合计: {total_val:.2f}")
+    note_val = st.text_input("备注")
+
+    if st.button("➕ 保存新增账单", use_container_width=True):
+        save_new_rec({
+            "date": str(now_date),
+            "type": now_type,
+            "category": now_cat,
+            "net": net_val,
+            "hst": hst_val,
+            "total": total_val,
+            "note": note_val
+        })
+        st.rerun()
+
+# 账单列表
+if records:
+    st.divider()
+    st.markdown("### 📋 全部账单列表")
+    df = pd.DataFrame(records)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date", ascending=False)
+
+    for idx, row in df.iterrows():
+        c = st.columns([1,1,1,1,1,1,1,0.5,0.5])
+        c[0].write(row["date"].strftime("%Y-%m-%d"))
+        c[1].write(row["type"])
+        c[2].write(row["category"])
+        c[3].write(f"{row['net']:.2f}")
+        c[4].write(f"{row['hst']:.2f}")
+        c[5].write(f"{row['total']:.2f}")
+        c[6].write(row["note"])
+
+        with c[7]:
+            if st.button("✏️", key=f"e_{row['id']}"):
+                st.session_state.edit_id = row["id"]
+                st.rerun()
+        with c[8]:
+            if st.button("🗑️", key=f"d_{row['id']}"):
+                del_rec(row["id"])
+                st.rerun()
+
+else:
+    st.info("暂无账单记录，可以先添加第一笔。")
